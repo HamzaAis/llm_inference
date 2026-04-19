@@ -45,6 +45,9 @@ def build_model_service(settings: Settings) -> ModelService:
         text_sampling=text_profile,
         vl_sampling=vl_profile,
         vl_system_prompt=settings.vl_system_prompt,
+        shared_kv=settings.model_shared_kv,
+        max_context=settings.model_max_context,
+        cuda_graph=settings.model_cuda_graph,
     )
 
 

@@ -39,6 +39,18 @@ class Settings(BaseSettings):
     model_verbose: bool = False
     model_precision: str = "q4f16"
 
+    # Experimental: patch the decoder ONNX graph to set
+    # past_present_share_buffer=1 on every GroupQueryAttention node.
+    # Enables static KV shapes + in-place KV writes, which unlocks ORT CUDA
+    # graph capture for ~30-50% faster decode on CUDA. Requires the
+    # generation loop to preallocate KV cache at max context size.
+    # Off by default so the stable path keeps working.
+    model_shared_kv: bool = False
+    model_max_context: int = 2048
+    # When shared_kv is on, enable ORT CUDA Graph capture for the decode session.
+    # Harmless to leave on; ORT falls back if shapes still vary.
+    model_cuda_graph: bool = True
+
     vl_system_prompt: str = (
         "You extract fields from images. Return COMPACT minified JSON on a single line, "
         "no whitespace or newlines. Use null for missing values. "

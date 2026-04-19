@@ -28,6 +28,9 @@ class ModelService:
         text_sampling: SamplingProfile,
         vl_sampling: SamplingProfile,
         vl_system_prompt: str = "",
+        shared_kv: bool = False,
+        max_context: int = 2048,
+        cuda_graph: bool = True,
     ) -> None:
         self._model_name = model_name
         self._hf_cache_dir = hf_cache_dir
@@ -38,12 +41,19 @@ class ModelService:
         self._text_sampling = text_sampling
         self._vl_sampling = vl_sampling
         self._vl_system_prompt = vl_system_prompt
+        self._shared_kv = shared_kv
+        self._max_context = max_context
+        self._cuda_graph = cuda_graph
         self._loaded: bool = False
         self._logger = logging.getLogger(__name__)
 
         self._vision_session: Any | None = None
         self._embed_session: Any | None = None
         self._decoder_session: Any | None = None
+        # When shared_kv + cuda_graph is on this is a distinct session without
+        # graph capture (for the prompt-length-dependent prefill pass).
+        # Otherwise it aliases _decoder_session.
+        self._prefill_decoder_session: Any | None = None
 
         self._processor: Any | None = None
         self._config: Any | None = None
@@ -108,6 +118,11 @@ class ModelService:
         embed_model_path = self._download_onnx_component(f"embed_tokens{suffix}")
         decoder_model_path = self._download_onnx_component(f"decoder_model_merged{suffix}")
 
+        # Optionally patch the decoder to use past_present_share_buffer on GQA
+        # so KV cache shapes become static. Cached on disk; patches once.
+        if self._shared_kv and self._provider == "cuda":
+            decoder_model_path = self._ensure_shared_kv_decoder(decoder_model_path)
+
         providers = self._get_providers()
         provider_options = self._get_provider_options()
 
@@ -123,9 +138,26 @@ class ModelService:
         self._embed_session = ort.InferenceSession(
             embed_model_path, sess_options=sess_options, providers=providers, provider_options=provider_options
         )
-        self._decoder_session = ort.InferenceSession(
-            decoder_model_path, sess_options=sess_options, providers=providers, provider_options=provider_options
+        # For shared-kv + CUDA graph, the decoder needs its own provider
+        # options with enable_cuda_graph=1. For prefill, the non-static prompt
+        # length prevents CUDA graph capture, so we keep a separate decoder
+        # session WITHOUT graph capture for the prefill step.
+        decoder_provider_options = self._get_provider_options(
+            for_decode=True if self._shared_kv else False
         )
+        self._decoder_session = ort.InferenceSession(
+            decoder_model_path, sess_options=sess_options, providers=providers, provider_options=decoder_provider_options
+        )
+        if self._shared_kv and self._cuda_graph and self._provider == "cuda":
+            prefill_provider_options = self._get_provider_options(for_decode=False)
+            self._prefill_decoder_session = ort.InferenceSession(
+                decoder_model_path,
+                sess_options=sess_options,
+                providers=providers,
+                provider_options=prefill_provider_options,
+            )
+        else:
+            self._prefill_decoder_session = self._decoder_session
 
         # Discover tensor dtypes from the graphs so inputs we build match the
         # model exactly. Mismatched dtypes cause ORT to insert Cast/Memcpy
@@ -202,19 +234,24 @@ class ModelService:
             return ["CUDAExecutionProvider", "CPUExecutionProvider"]
         return ["CPUExecutionProvider"]
 
-    def _get_provider_options(self) -> list[dict[str, Any]]:
-        """Get provider-specific options for CUDA optimization."""
+    def _get_provider_options(self, for_decode: bool = False) -> list[dict[str, Any]]:
+        """Get provider-specific options for CUDA optimization.
+
+        When `for_decode` is True and shared_kv + cuda_graph are enabled, this
+        also turns on ORT's CUDA graph capture for the steady-state decode
+        shape. The first run after session creation is the warmup; subsequent
+        runs replay the captured graph which removes most per-step kernel
+        launch and Python overhead.
+        """
         if self._provider == "cuda":
-            # Tuned for small-VRAM GPUs (e.g. 6GB RTX 3050). kSameAsRequested
-            # avoids doubling the arena on every allocation, which matters
-            # because the q4 decoder + fp16 embed + vision encoder already
-            # sit close to the VRAM ceiling on this card.
-            cuda_options = {
+            cuda_options: dict[str, Any] = {
                 "device_id": 0,
                 "arena_extend_strategy": "kSameAsRequested",
                 "cudnn_conv_algo_search": "HEURISTIC",
                 "do_copy_in_default_stream": True,
             }
+            if for_decode and self._shared_kv and self._cuda_graph:
+                cuda_options["enable_cuda_graph"] = "1"
             return [cuda_options, {}]
         return [{}]
 
@@ -224,11 +261,34 @@ class ModelService:
         self._vision_session = None
         self._embed_session = None
         self._decoder_session = None
+        self._prefill_decoder_session = None
         self._processor = None
         self._config = None
         self._decoder_output_names = []
         self._loaded = False
         gc.collect()
+
+    def _ensure_shared_kv_decoder(self, source_path: str) -> str:
+        """Placeholder for future shared-KV / CUDA-graph support.
+
+        NOTE: as of ORT 1.24 the contrib GroupQueryAttention op does NOT
+        accept `past_present_share_buffer` as a node attribute (schema error
+        "Unrecognized attribute"). Shared-buffer KV is currently only wired
+        up through the `onnxruntime-genai` runtime + its model_builder, which
+        does not support the Mistral-3 vision architecture.
+
+        Until a supported path exists (newer ORT that exposes the attribute,
+        or genai support for this model family) we just return the source
+        model unchanged. The rest of the shared_kv code path is harmless;
+        it preallocates KV/mask buffers but without the kernel doing in-place
+        writes it doesn't help performance. Keep shared_kv=False in settings.
+        """
+        self._logger.warning(
+            "shared_kv requested but not supported on ORT %s for this model; "
+            "using the unpatched decoder. See ModelService._ensure_shared_kv_decoder.",
+            __import__("onnxruntime").__version__,
+        )
+        return source_path
 
     def _generate_sync(self, request: GenerationRequest) -> GenerationResult:
         assert self._processor is not None
@@ -289,7 +349,16 @@ class ModelService:
 
         max_new_tokens = request.max_new_tokens
 
-        if self._provider == "cuda":
+        if self._provider == "cuda" and self._shared_kv:
+            generated_token_ids = self._generate_loop_cuda_shared_kv(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                pixel_values=pixel_values,
+                batch_size=batch_size,
+                max_new_tokens=max_new_tokens,
+            )
+        elif self._provider == "cuda":
             generated_token_ids = self._generate_loop_cuda(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -544,6 +613,217 @@ class ModelService:
                 new_past[f"past_key_values.{parts[1]}.{parts[2]}"] = outputs[i]
 
         return new_past, first_token, prompt_len
+
+    def _generate_loop_cuda_shared_kv(
+        self,
+        *,
+        input_ids: np.ndarray,
+        attention_mask: np.ndarray,
+        position_ids: np.ndarray,
+        pixel_values: np.ndarray | None,
+        batch_size: int,
+        max_new_tokens: int,
+    ) -> list[int]:
+        """Shared-KV decoder variant: preallocated KV at max_context, CUDA-graph friendly.
+
+        Needs the decoder ONNX to have been patched so every GroupQueryAttention
+        node has past_present_share_buffer=1. That lets us bind the same GPU
+        buffer as both past_key_values.L.K (input) and present.L.K (output)
+        for every layer, giving ORT fully static shapes per step and unlocking
+        CUDA graph capture.
+        """
+        from onnxruntime import OrtValue
+
+        assert self._embed_session is not None
+        assert self._decoder_session is not None
+        assert self._prefill_decoder_session is not None
+
+        device = "cuda"
+        device_id = 0
+        MAX_CTX = self._max_context
+
+        prompt_len = int(input_ids.shape[-1])
+        if prompt_len + max_new_tokens > MAX_CTX:
+            raise RuntimeError(
+                f"prompt({prompt_len}) + max_new_tokens({max_new_tokens}) > model_max_context({MAX_CTX})"
+            )
+
+        # ---- Preallocate full-size GPU buffers once for the whole request. ----
+        # KV cache is the big one: [1, kv_heads, MAX_CTX, head_dim] per layer per K/V.
+        kv_shape = [batch_size, self._num_key_value_heads, MAX_CTX, self._head_dim]
+        past_kv: dict[str, Any] = {}
+        for layer in range(self._num_hidden_layers):
+            for kv in ("key", "value"):
+                zeros = np.zeros(kv_shape, dtype=self._kv_dtype_np)
+                past_kv[f"past_key_values.{layer}.{kv}"] = OrtValue.ortvalue_from_numpy(
+                    zeros, device, device_id
+                )
+
+        # Attention_mask is always length MAX_CTX; host-side buffer we mutate.
+        mask_host = np.zeros((batch_size, MAX_CTX), dtype=np.int64)
+        mask_host[:, :prompt_len] = 1  # prompt positions valid
+        mask_ov = OrtValue.ortvalue_from_numpy(mask_host, device, device_id)
+
+        # ---- 1) PREFILL via the non-graph-captured session. ----
+        t_prefill = time.perf_counter()
+
+        # Embed + vision merge (same as other path).
+        embed_io = self._embed_session.io_binding()
+        prompt_ids_ov = OrtValue.ortvalue_from_numpy(input_ids, device, device_id)
+        embed_io.bind_ortvalue_input("input_ids", prompt_ids_ov)
+        embed_io.bind_output("inputs_embeds", device, device_id)
+        self._embed_session.run_with_iobinding(embed_io)
+        inputs_embeds_ov = embed_io.get_outputs()[0]
+
+        if pixel_values is not None:
+            assert self._vision_session is not None
+            t_vis = time.perf_counter()
+            image_features = self._vision_session.run(None, {"pixel_values": pixel_values})[0]
+            self._logger.info(
+                "vision done image_features_shape=%s vision_ms=%.1f",
+                image_features.shape,
+                (time.perf_counter() - t_vis) * 1000.0,
+            )
+            image_token_mask = input_ids == self._image_token_index
+            if image_token_mask.any():
+                embeds_np = inputs_embeds_ov.numpy()
+                feature_dim = image_features.shape[-1]
+                embeds_np[image_token_mask] = image_features.reshape(-1, feature_dim).astype(
+                    embeds_np.dtype
+                )
+                inputs_embeds_ov = OrtValue.ortvalue_from_numpy(embeds_np, device, device_id)
+
+        # Prefill decoder call on the session WITHOUT CUDA graph capture,
+        # because prompt_len (and thus the sequence dim of inputs_embeds) varies.
+        prefill_io = self._prefill_decoder_session.io_binding()
+        prefill_io.bind_ortvalue_input("inputs_embeds", inputs_embeds_ov)
+        prefill_io.bind_ortvalue_input("attention_mask", mask_ov)
+        prefill_io.bind_ortvalue_input(
+            "position_ids", OrtValue.ortvalue_from_numpy(position_ids, device, device_id)
+        )
+        # Bind the same preallocated KV buffers as both past (inputs) and
+        # present (outputs). past_present_share_buffer=1 means the op writes
+        # in-place so these refer to the same memory.
+        for layer in range(self._num_hidden_layers):
+            for kv in ("key", "value"):
+                in_name = f"past_key_values.{layer}.{kv}"
+                out_name = f"present.{layer}.{kv}"
+                ov = past_kv[in_name]
+                prefill_io.bind_ortvalue_input(in_name, ov)
+                prefill_io.bind_ortvalue_output(out_name, ov)
+        prefill_io.bind_output("logits", device, device_id)
+
+        self._prefill_decoder_session.run_with_iobinding(prefill_io)
+        logits_ov = prefill_io.get_outputs()[0]
+        # Only the LAST prompt position's logits matter for the first token.
+        logits_np = logits_ov.numpy()
+        first_token = int(logits_np[0, -1].argmax())
+        prefill_ms = (time.perf_counter() - t_prefill) * 1000.0
+        self._logger.info(
+            "prefill done prompt_len=%d prefill_ms=%.1f first_tok=%d",
+            prompt_len,
+            prefill_ms,
+            first_token,
+        )
+
+        generated: list[int] = [first_token]
+        if first_token == self._eos_token_id or max_new_tokens <= 1:
+            return generated
+
+        # ---- 2) DECODE loop using the CUDA-graph-captured session. ----
+        t_decode = time.perf_counter()
+
+        # [1,1] static-shape buffers we update in place every step.
+        one_id = np.array([[first_token]], dtype=np.int64)
+        input_id_ov = OrtValue.ortvalue_from_numpy(one_id, device, device_id)
+        one_pos = np.array([[prompt_len]], dtype=np.int64)
+        position_ov = OrtValue.ortvalue_from_numpy(one_pos, device, device_id)
+
+        # Also preallocate the embed output for [1,1,hidden_dim] so every step
+        # writes into the same GPU buffer.
+        hidden_dim = self._config.text_config.hidden_size if self._config is not None else 3072
+        embed_out_shape = [1, 1, hidden_dim]
+        embeds_ov = OrtValue.ortvalue_from_shape_and_type(
+            embed_out_shape, self._embed_dtype_np, device, device_id
+        )
+
+        # Preallocate the decoder logits output on GPU as [1, 1, vocab_size].
+        vocab_size = self._config.text_config.vocab_size if self._config is not None else 131072
+        logits_dtype = self._onnx_type_to_numpy(
+            self._find_input_type_output(self._decoder_session, "logits"),
+            default=np.float32,
+        )
+        decode_logits_ov = OrtValue.ortvalue_from_shape_and_type(
+            [1, 1, vocab_size], logits_dtype, device, device_id
+        )
+
+        # Reusable embed/decoder IOBindings.
+        embed_io_d = self._embed_session.io_binding()
+        dec_io = self._decoder_session.io_binding()
+
+        # Bind the inputs/outputs of the decoder that don't change each step.
+        # (KV buffers and attention_mask OrtValue are the same objects across
+        # steps; only attention_mask CONTENTS change via update_inplace.)
+        dec_io.bind_ortvalue_input("inputs_embeds", embeds_ov)
+        dec_io.bind_ortvalue_input("attention_mask", mask_ov)
+        dec_io.bind_ortvalue_input("position_ids", position_ov)
+        for layer in range(self._num_hidden_layers):
+            for kv in ("key", "value"):
+                in_name = f"past_key_values.{layer}.{kv}"
+                out_name = f"present.{layer}.{kv}"
+                ov = past_kv[in_name]
+                dec_io.bind_ortvalue_input(in_name, ov)
+                dec_io.bind_ortvalue_output(out_name, ov)
+        dec_io.bind_ortvalue_output("logits", decode_logits_ov)
+
+        for step in range(1, max_new_tokens):
+            cur_valid_len = prompt_len + step  # after appending the new token
+
+            # Extend attention_mask on host + re-upload to the SAME GPU buffer.
+            mask_host[:, cur_valid_len - 1] = 1
+            mask_ov.update_inplace(mask_host)
+
+            # Update input_id and position_id in place.
+            one_id[0, 0] = generated[-1]
+            input_id_ov.update_inplace(one_id)
+            one_pos[0, 0] = cur_valid_len - 1  # 0-indexed position of the new token
+            position_ov.update_inplace(one_pos)
+
+            # Embed: bind input, run, output into embeds_ov (preallocated).
+            embed_io_d.clear_binding_inputs()
+            embed_io_d.clear_binding_outputs()
+            embed_io_d.bind_ortvalue_input("input_ids", input_id_ov)
+            embed_io_d.bind_ortvalue_output("inputs_embeds", embeds_ov)
+            self._embed_session.run_with_iobinding(embed_io_d)
+
+            # Decoder: all bindings already set above, just re-run. With CUDA
+            # graph capture enabled, the first run warms up and subsequent
+            # runs replay the captured graph.
+            self._decoder_session.run_with_iobinding(dec_io)
+
+            # Copy the small decode logits [1,1,vocab] to host and argmax.
+            logits_step = decode_logits_ov.numpy()
+            next_token = int(logits_step[0, 0].argmax())
+            generated.append(next_token)
+            if next_token == self._eos_token_id:
+                break
+
+        decode_ms = (time.perf_counter() - t_decode) * 1000.0
+        decoded = len(generated) - 1
+        self._logger.info(
+            "decode done steps=%d decode_ms=%.1f per_step_ms=%.2f (shared_kv+graph)",
+            decoded,
+            decode_ms,
+            decode_ms / max(1, decoded),
+        )
+        return generated
+
+    @staticmethod
+    def _find_input_type_output(session: Any, name: str) -> str | None:
+        for meta in session.get_outputs():
+            if meta.name == name:
+                return meta.type
+        return None
 
     def _generate_loop_cpu(
         self,
