@@ -403,12 +403,17 @@ class ModelService:
         batch_size: int,
         max_new_tokens: int,
     ) -> list[int]:
-        """Greedy decode on GPU using IOBinding, split into prefill + decode.
+        """Greedy decode on GPU using IOBinding.
 
-        Prefill processes the whole prompt (and optional image) in one pass.
-        Decode is a tight loop that reuses a single IOBinding object and
-        preallocated [1,1] GPU buffers for input_ids/position_ids, so only
-        the growing attention_mask and KV cache need to be rebound each step.
+        Note: the IOBinding MUST be created fresh per inference step. In ORT
+        1.24 the CUDA buffers that back `IOBinding.get_outputs()` are released
+        when the originating IOBinding is destroyed, so handing OrtValues back
+        through a function return or across a `clear_binding_outputs()` call
+        leaves them as dangling references (you get "Invalid rank ... Got: 0"
+        on the next use). The safe pattern - which is what this loop uses -
+        is: each step creates its own IOBinding, uses its outputs as inputs
+        of the NEXT step (by stashing them in `past_kv`), then lets the old
+        IOBinding die AFTER the next one has already consumed its outputs.
         """
         from onnxruntime import OrtValue
 
@@ -418,59 +423,119 @@ class ModelService:
         device = "cuda"
         device_id = 0
 
-        t_phase = time.perf_counter()
+        # ---- PREFILL (inlined so IOBinding stays in scope) -----------------
+        t_prefill = time.perf_counter()
 
-        # --- PREFILL --------------------------------------------------------
-        past_kv, first_token, prompt_len = self._prefill_cuda(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            pixel_values=pixel_values,
-            batch_size=batch_size,
-            device=device,
-            device_id=device_id,
+        prompt_len = int(input_ids.shape[-1])
+
+        # 1. Text embed lookup on GPU.
+        prefill_embed_io = self._embed_session.io_binding()
+        prompt_ids_ov = OrtValue.ortvalue_from_numpy(input_ids, device, device_id)
+        prefill_embed_io.bind_ortvalue_input("input_ids", prompt_ids_ov)
+        prefill_embed_io.bind_output("inputs_embeds", device, device_id)
+        self._embed_session.run_with_iobinding(prefill_embed_io)
+        inputs_embeds_ov = prefill_embed_io.get_outputs()[0]
+
+        # 2. Vision encode + embed merge if image present.
+        if pixel_values is not None:
+            assert self._vision_session is not None
+            t_vis = time.perf_counter()
+            image_features = self._vision_session.run(
+                None, {"pixel_values": pixel_values}
+            )[0]
+            self._logger.info(
+                "vision done image_features_shape=%s vision_ms=%.1f",
+                image_features.shape,
+                (time.perf_counter() - t_vis) * 1000.0,
+            )
+            image_token_mask = input_ids == self._image_token_index
+            if image_token_mask.any():
+                embeds_np = inputs_embeds_ov.numpy()
+                feature_dim = image_features.shape[-1]
+                embeds_np[image_token_mask] = image_features.reshape(
+                    -1, feature_dim
+                ).astype(embeds_np.dtype)
+                inputs_embeds_ov = OrtValue.ortvalue_from_numpy(
+                    embeds_np, device, device_id
+                )
+
+        # 3. Empty KV cache (past_sequence_length=0) on GPU in the model dtype.
+        empty_shape = [batch_size, self._num_key_value_heads, 0, self._head_dim]
+        past_kv: dict[str, Any] = {}
+        for layer in range(self._num_hidden_layers):
+            for kv in ("key", "value"):
+                empty_np = np.zeros(empty_shape, dtype=self._kv_dtype_np)
+                past_kv[f"past_key_values.{layer}.{kv}"] = OrtValue.ortvalue_from_numpy(
+                    empty_np, device, device_id
+                )
+
+        # 4. Decoder prefill pass. The IOBinding MUST stay alive until after
+        # the FIRST decode step has consumed its outputs (the past_kv we
+        # harvest below), otherwise those OrtValues become invalid. We keep
+        # a reference to `prefill_dec_io` in a list below.
+        prefill_dec_io = self._decoder_session.io_binding()
+        prefill_dec_io.bind_ortvalue_input("inputs_embeds", inputs_embeds_ov)
+        prefill_dec_io.bind_ortvalue_input(
+            "attention_mask", OrtValue.ortvalue_from_numpy(attention_mask, device, device_id)
         )
+        prefill_dec_io.bind_ortvalue_input(
+            "position_ids", OrtValue.ortvalue_from_numpy(position_ids, device, device_id)
+        )
+        for name, ov in past_kv.items():
+            prefill_dec_io.bind_ortvalue_input(name, ov)
+        for out_name in self._decoder_output_names:
+            prefill_dec_io.bind_output(out_name, device, device_id)
 
-        prefill_ms = (time.perf_counter() - t_phase) * 1000.0
-        self._logger.info("prefill done prompt_len=%d prefill_ms=%.1f", prompt_len, prefill_ms)
+        self._decoder_session.run_with_iobinding(prefill_dec_io)
+        outputs = prefill_dec_io.get_outputs()
+
+        logits_np = outputs[0].numpy()
+        first_token = int(logits_np[0, -1].argmax())
+
+        past_kv = {}
+        for i, out_name in enumerate(self._decoder_output_names):
+            if out_name.startswith("present."):
+                parts = out_name.split(".")
+                past_kv[f"past_key_values.{parts[1]}.{parts[2]}"] = outputs[i]
+
+        prefill_ms = (time.perf_counter() - t_prefill) * 1000.0
+        self._logger.info(
+            "prefill done prompt_len=%d prefill_ms=%.1f first_tok=%d",
+            prompt_len,
+            prefill_ms,
+            first_token,
+        )
 
         generated: list[int] = [first_token]
         if first_token == self._eos_token_id or max_new_tokens <= 1:
             return generated
 
-        # --- DECODE LOOP ----------------------------------------------------
+        # ---- DECODE LOOP ---------------------------------------------------
         t_decode_start = time.perf_counter()
 
-        # Preallocated [1,1] GPU buffers we can update numpy-side and reuse.
+        # Preallocated [1,1] GPU buffers we can update numpy-side via
+        # update_inplace() each step - avoids per-step host->device alloc.
         input_ids_np = np.array([[first_token]], dtype=np.int64)
         input_ids_ov = OrtValue.ortvalue_from_numpy(input_ids_np, device, device_id)
 
         position_np = np.array([[prompt_len]], dtype=np.int64)
         position_ids_ov = OrtValue.ortvalue_from_numpy(position_np, device, device_id)
 
-        # attention_mask grows by 1 each step; we rebuild it on CPU as a
-        # contiguous slice of a preallocated buffer, then re-upload.
+        # Host-side mask buffer: slice up to cur_total_len each step and
+        # upload (tiny, <2KB). Avoids concatenating numpy arrays per step.
         max_ctx = prompt_len + max_new_tokens + 8
         mask_buffer = np.ones((batch_size, max_ctx), dtype=np.int64)
 
-        # One IOBinding reused across all decode steps (saves Python overhead
-        # of recreating the binding object 175x).
-        dec_io = self._decoder_session.io_binding()
-        embed_io = self._embed_session.io_binding()
+        # This list keeps the PREVIOUS step's IOBinding alive until AFTER
+        # the current step has run. Without this the outputs from step N-1
+        # that we stashed in past_kv get invalidated when step N starts.
+        prev_binding_holder: list[Any] = [prefill_dec_io]
 
         for step in range(1, max_new_tokens):
             cur_total_len = prompt_len + step
 
-            # Embed the single previously-generated token.
+            # Update small preallocated GPU buffers in place.
             input_ids_ov.update_inplace(input_ids_np)
-            embed_io.clear_binding_inputs()
-            embed_io.clear_binding_outputs()
-            embed_io.bind_ortvalue_input("input_ids", input_ids_ov)
-            embed_io.bind_output("inputs_embeds", device, device_id)
-            self._embed_session.run_with_iobinding(embed_io)
-            inputs_embeds_ov = embed_io.get_outputs()[0]
-
-            # Update the tiny host-side buffers that depend on step count.
             position_np[0, 0] = cur_total_len - 1
             position_ids_ov.update_inplace(position_np)
             attention_mask_np = mask_buffer[:, :cur_total_len]
@@ -478,9 +543,18 @@ class ModelService:
                 attention_mask_np, device, device_id
             )
 
-            # Rebind and run decoder.
-            dec_io.clear_binding_inputs()
-            dec_io.clear_binding_outputs()
+            # Fresh embed IOBinding per step (its single output is consumed
+            # immediately by the decoder run below).
+            embed_io = self._embed_session.io_binding()
+            embed_io.bind_ortvalue_input("input_ids", input_ids_ov)
+            embed_io.bind_output("inputs_embeds", device, device_id)
+            self._embed_session.run_with_iobinding(embed_io)
+            inputs_embeds_ov = embed_io.get_outputs()[0]
+
+            # Fresh decoder IOBinding per step - REQUIRED so past_kv (which
+            # holds OrtValues owned by the previous step's binding) stays
+            # valid through this run.
+            dec_io = self._decoder_session.io_binding()
             dec_io.bind_ortvalue_input("inputs_embeds", inputs_embeds_ov)
             dec_io.bind_ortvalue_input("attention_mask", attention_mask_ov)
             dec_io.bind_ortvalue_input("position_ids", position_ids_ov)
@@ -492,14 +566,13 @@ class ModelService:
             self._decoder_session.run_with_iobinding(dec_io)
             outputs = dec_io.get_outputs()
 
-            # Only the last-position logits matter on a decode step (seq=1).
-            logits_np = outputs[0].numpy()
-            next_token = int(logits_np[0, -1].argmax())
+            # Last-position logits only (shape [1, 1, vocab] in decode).
+            next_token = int(outputs[0].numpy()[0, -1].argmax())
             generated.append(next_token)
             if next_token == self._eos_token_id:
                 break
 
-            # Rotate present.* -> past_key_values.* (all still on GPU).
+            # Rotate present.* -> past_key_values.* (still GPU-resident).
             new_past: dict[str, Any] = {}
             for i, out_name in enumerate(self._decoder_output_names):
                 if out_name.startswith("present."):
@@ -507,19 +580,24 @@ class ModelService:
                     new_past[f"past_key_values.{parts[1]}.{parts[2]}"] = outputs[i]
             past_kv = new_past
 
-            # Prep next iteration's input token.
+            # Hand over IOBinding ownership: keep THIS step's binding alive,
+            # release the previous one (whose outputs we no longer need).
+            prev_binding_holder[0] = dec_io
+
+            # Next iteration's input token.
             input_ids_np[0, 0] = next_token
 
         decode_ms = (time.perf_counter() - t_decode_start) * 1000.0
         decoded_tokens = len(generated) - 1
-        per_tok = decode_ms / max(1, decoded_tokens)
         self._logger.info(
             "decode done steps=%d decode_ms=%.1f per_step_ms=%.2f",
             decoded_tokens,
             decode_ms,
-            per_tok,
+            decode_ms / max(1, decoded_tokens),
         )
 
+        # prev_binding_holder goes out of scope here; its contents are freed.
+        del prev_binding_holder
         return generated
 
     def _prefill_cuda(
