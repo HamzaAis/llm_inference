@@ -1,0 +1,7 @@
+Alembic migrations for llm-inferance.
+
+Generate a new revision:
+  uv run alembic revision --autogenerate -m "<message>"
+
+Apply migrations:
+  uv run alembic upgrade head
