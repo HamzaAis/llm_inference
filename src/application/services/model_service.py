@@ -27,6 +27,7 @@ class ModelService:
         image_max_side: int,
         text_sampling: SamplingProfile,
         vl_sampling: SamplingProfile,
+        vl_system_prompt: str = "",
     ) -> None:
         self._model_name = model_name
         self._hf_cache_dir = hf_cache_dir
@@ -36,6 +37,7 @@ class ModelService:
         self._image_max_side = max(1, image_max_side)
         self._text_sampling = text_sampling
         self._vl_sampling = vl_sampling
+        self._vl_system_prompt = vl_system_prompt
         self._loaded: bool = False
         self._logger = logging.getLogger(__name__)
 
@@ -251,21 +253,7 @@ class ModelService:
 
         messages: list[dict[str, Any]] = []
 
-        system_text = None
-        if request.system_prompt:
-            system_text = request.system_prompt
-        elif has_image:
-            system_text = (
-                "You are a precise document extraction assistant. "
-                "Extract ONLY the exact text and values visible in the image. "
-                "Do NOT guess, infer, hallucinate, or invent any information. "
-                "Do NOT repeat placeholder patterns like 'A1, A2, A3...' or similar sequences. "
-                "For missing values, use proper JSON null: \"field_name\": null "
-                "Do NOT invent field names with underscores like '__null__'. "
-                "Read all numbers and text exactly as shown - verify each character. "
-                "BAD EXAMPLE: 'A1, A2, A3...' is never correct. "
-                "Return clean, valid JSON without invented placeholder keys."
-            )
+        system_text = request.system_prompt or (self._vl_system_prompt if has_image else None)
 
         if system_text:
             messages.append({"role": "system", "content": [{"type": "text", "text": system_text}]})
@@ -346,70 +334,88 @@ class ModelService:
         batch_size: int,
         max_new_tokens: int,
     ) -> list[int]:
-        """Greedy decode on GPU using IOBinding.
+        """Greedy decode on GPU using IOBinding, split into prefill + decode.
 
-        The KV cache lives entirely on device: each step's `present.*` outputs
-        are rebound as the next step's `past_key_values.*` inputs, so nothing
-        but the final-token logits ever travels GPU->CPU per step.
+        Prefill processes the whole prompt (and optional image) in one pass.
+        Decode is a tight loop that reuses a single IOBinding object and
+        preallocated [1,1] GPU buffers for input_ids/position_ids, so only
+        the growing attention_mask and KV cache need to be rebound each step.
         """
         from onnxruntime import OrtValue
 
         assert self._embed_session is not None
         assert self._decoder_session is not None
-        assert self._vision_session is not None
 
         device = "cuda"
         device_id = 0
 
-        # Empty KV cache on GPU in the model's native dtype.
-        past_kv_values: dict[str, Any] = {}
-        empty_shape = [batch_size, self._num_key_value_heads, 0, self._head_dim]
-        for layer in range(self._num_hidden_layers):
-            for kv in ("key", "value"):
-                name = f"past_key_values.{layer}.{kv}"
-                empty_np = np.zeros(empty_shape, dtype=self._kv_dtype_np)
-                past_kv_values[name] = OrtValue.ortvalue_from_numpy(empty_np, device, device_id)
+        t_phase = time.perf_counter()
 
-        generated: list[int] = []
-        is_first_iteration = True
+        # --- PREFILL --------------------------------------------------------
+        past_kv, first_token, prompt_len = self._prefill_cuda(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            pixel_values=pixel_values,
+            batch_size=batch_size,
+            device=device,
+            device_id=device_id,
+        )
 
-        for _ in range(max_new_tokens):
-            # --- 1. Embed lookup (tiny; stays on GPU). ---
-            embed_io = self._embed_session.io_binding()
-            input_ids_ov = OrtValue.ortvalue_from_numpy(input_ids, device, device_id)
+        prefill_ms = (time.perf_counter() - t_phase) * 1000.0
+        self._logger.info("prefill done prompt_len=%d prefill_ms=%.1f", prompt_len, prefill_ms)
+
+        generated: list[int] = [first_token]
+        if first_token == self._eos_token_id or max_new_tokens <= 1:
+            return generated
+
+        # --- DECODE LOOP ----------------------------------------------------
+        t_decode_start = time.perf_counter()
+
+        # Preallocated [1,1] GPU buffers we can update numpy-side and reuse.
+        input_ids_np = np.array([[first_token]], dtype=np.int64)
+        input_ids_ov = OrtValue.ortvalue_from_numpy(input_ids_np, device, device_id)
+
+        position_np = np.array([[prompt_len]], dtype=np.int64)
+        position_ids_ov = OrtValue.ortvalue_from_numpy(position_np, device, device_id)
+
+        # attention_mask grows by 1 each step; we rebuild it on CPU as a
+        # contiguous slice of a preallocated buffer, then re-upload.
+        max_ctx = prompt_len + max_new_tokens + 8
+        mask_buffer = np.ones((batch_size, max_ctx), dtype=np.int64)
+
+        # One IOBinding reused across all decode steps (saves Python overhead
+        # of recreating the binding object 175x).
+        dec_io = self._decoder_session.io_binding()
+        embed_io = self._embed_session.io_binding()
+
+        for step in range(1, max_new_tokens):
+            cur_total_len = prompt_len + step
+
+            # Embed the single previously-generated token.
+            input_ids_ov.update_inplace(input_ids_np)
+            embed_io.clear_binding_inputs()
+            embed_io.clear_binding_outputs()
             embed_io.bind_ortvalue_input("input_ids", input_ids_ov)
             embed_io.bind_output("inputs_embeds", device, device_id)
             self._embed_session.run_with_iobinding(embed_io)
             inputs_embeds_ov = embed_io.get_outputs()[0]
 
-            # --- 2. Vision merge (first step only, when an image is present). ---
-            if is_first_iteration and pixel_values is not None:
-                image_features = self._vision_session.run(
-                    None, {"pixel_values": pixel_values}
-                )[0]
-                image_token_mask = input_ids == self._image_token_index
-                if image_token_mask.any():
-                    embeds_np = inputs_embeds_ov.numpy()
-                    feature_dim = image_features.shape[-1]
-                    embeds_np[image_token_mask] = image_features.reshape(
-                        -1, feature_dim
-                    ).astype(embeds_np.dtype)
-                    inputs_embeds_ov = OrtValue.ortvalue_from_numpy(
-                        embeds_np, device, device_id
-                    )
+            # Update the tiny host-side buffers that depend on step count.
+            position_np[0, 0] = cur_total_len - 1
+            position_ids_ov.update_inplace(position_np)
+            attention_mask_np = mask_buffer[:, :cur_total_len]
+            attention_mask_ov = OrtValue.ortvalue_from_numpy(
+                attention_mask_np, device, device_id
+            )
 
-            # --- 3. Decoder step with IOBinding. Past KV stays on GPU. ---
-            dec_io = self._decoder_session.io_binding()
+            # Rebind and run decoder.
+            dec_io.clear_binding_inputs()
+            dec_io.clear_binding_outputs()
             dec_io.bind_ortvalue_input("inputs_embeds", inputs_embeds_ov)
-            dec_io.bind_ortvalue_input(
-                "attention_mask",
-                OrtValue.ortvalue_from_numpy(attention_mask, device, device_id),
-            )
-            dec_io.bind_ortvalue_input(
-                "position_ids",
-                OrtValue.ortvalue_from_numpy(position_ids, device, device_id),
-            )
-            for name, ov in past_kv_values.items():
+            dec_io.bind_ortvalue_input("attention_mask", attention_mask_ov)
+            dec_io.bind_ortvalue_input("position_ids", position_ids_ov)
+            for name, ov in past_kv.items():
                 dec_io.bind_ortvalue_input(name, ov)
             for out_name in self._decoder_output_names:
                 dec_io.bind_output(out_name, device, device_id)
@@ -417,33 +423,127 @@ class ModelService:
             self._decoder_session.run_with_iobinding(dec_io)
             outputs = dec_io.get_outputs()
 
-            # --- 4. Sample greedy from last position only. ---
-            logits_np = outputs[0].numpy()  # [batch, seq, vocab]
+            # Only the last-position logits matter on a decode step (seq=1).
+            logits_np = outputs[0].numpy()
             next_token = int(logits_np[0, -1].argmax())
             generated.append(next_token)
-
             if next_token == self._eos_token_id:
                 break
 
-            # --- 5. Rotate present.* -> past_key_values.* (still on GPU). ---
+            # Rotate present.* -> past_key_values.* (all still on GPU).
             new_past: dict[str, Any] = {}
             for i, out_name in enumerate(self._decoder_output_names):
                 if out_name.startswith("present."):
                     parts = out_name.split(".")
-                    layer_idx, kv = parts[1], parts[2]
-                    new_past[f"past_key_values.{layer_idx}.{kv}"] = outputs[i]
-            past_kv_values = new_past
+                    new_past[f"past_key_values.{parts[1]}.{parts[2]}"] = outputs[i]
+            past_kv = new_past
 
-            # --- 6. Prepare next step. ---
-            input_ids = np.asarray([[next_token]], dtype=np.int64)
-            attention_mask = np.concatenate(
-                [attention_mask, np.ones((batch_size, 1), dtype=attention_mask.dtype)],
-                axis=-1,
-            )
-            position_ids = position_ids[:, -1:] + 1
-            is_first_iteration = False
+            # Prep next iteration's input token.
+            input_ids_np[0, 0] = next_token
+
+        decode_ms = (time.perf_counter() - t_decode_start) * 1000.0
+        decoded_tokens = len(generated) - 1
+        per_tok = decode_ms / max(1, decoded_tokens)
+        self._logger.info(
+            "decode done steps=%d decode_ms=%.1f per_step_ms=%.2f",
+            decoded_tokens,
+            decode_ms,
+            per_tok,
+        )
 
         return generated
+
+    def _prefill_cuda(
+        self,
+        *,
+        input_ids: np.ndarray,
+        attention_mask: np.ndarray,
+        position_ids: np.ndarray,
+        pixel_values: np.ndarray | None,
+        batch_size: int,
+        device: str,
+        device_id: int,
+    ) -> tuple[dict[str, Any], int, int]:
+        """Single prompt-ingestion pass. Returns (past_kv, first_token, prompt_len)."""
+        from onnxruntime import OrtValue
+
+        assert self._embed_session is not None
+        assert self._decoder_session is not None
+
+        prompt_len = int(input_ids.shape[-1])
+
+        # 1. Text embed lookup on GPU.
+        embed_io = self._embed_session.io_binding()
+        input_ids_ov = OrtValue.ortvalue_from_numpy(input_ids, device, device_id)
+        embed_io.bind_ortvalue_input("input_ids", input_ids_ov)
+        embed_io.bind_output("inputs_embeds", device, device_id)
+        self._embed_session.run_with_iobinding(embed_io)
+        inputs_embeds_ov = embed_io.get_outputs()[0]
+
+        # 2. Vision encode + embed merge if image present.
+        if pixel_values is not None:
+            assert self._vision_session is not None
+            t_vis = time.perf_counter()
+            image_features = self._vision_session.run(
+                None, {"pixel_values": pixel_values}
+            )[0]
+            vision_ms = (time.perf_counter() - t_vis) * 1000.0
+            self._logger.info(
+                "vision done image_features_shape=%s vision_ms=%.1f",
+                image_features.shape,
+                vision_ms,
+            )
+
+            image_token_mask = input_ids == self._image_token_index
+            if image_token_mask.any():
+                embeds_np = inputs_embeds_ov.numpy()
+                feature_dim = image_features.shape[-1]
+                embeds_np[image_token_mask] = image_features.reshape(
+                    -1, feature_dim
+                ).astype(embeds_np.dtype)
+                inputs_embeds_ov = OrtValue.ortvalue_from_numpy(
+                    embeds_np, device, device_id
+                )
+
+        # 3. Empty KV cache (past_sequence_length=0) on GPU in the model dtype.
+        empty_shape = [batch_size, self._num_key_value_heads, 0, self._head_dim]
+        past_kv: dict[str, Any] = {}
+        for layer in range(self._num_hidden_layers):
+            for kv in ("key", "value"):
+                empty_np = np.zeros(empty_shape, dtype=self._kv_dtype_np)
+                past_kv[f"past_key_values.{layer}.{kv}"] = OrtValue.ortvalue_from_numpy(
+                    empty_np, device, device_id
+                )
+
+        # 4. Decoder prefill pass.
+        dec_io = self._decoder_session.io_binding()
+        dec_io.bind_ortvalue_input("inputs_embeds", inputs_embeds_ov)
+        dec_io.bind_ortvalue_input(
+            "attention_mask", OrtValue.ortvalue_from_numpy(attention_mask, device, device_id)
+        )
+        dec_io.bind_ortvalue_input(
+            "position_ids", OrtValue.ortvalue_from_numpy(position_ids, device, device_id)
+        )
+        for name, ov in past_kv.items():
+            dec_io.bind_ortvalue_input(name, ov)
+        for out_name in self._decoder_output_names:
+            dec_io.bind_output(out_name, device, device_id)
+
+        self._decoder_session.run_with_iobinding(dec_io)
+        outputs = dec_io.get_outputs()
+
+        # First-token selection from last prompt position.
+        logits_np = outputs[0].numpy()
+        first_token = int(logits_np[0, -1].argmax())
+
+        # Harvest present.* as new past_kv.
+        new_past: dict[str, Any] = {}
+        for i, out_name in enumerate(self._decoder_output_names):
+            if out_name.startswith("present."):
+                parts = out_name.split(".")
+                new_past[f"past_key_values.{parts[1]}.{parts[2]}"] = outputs[i]
+
+        return new_past, first_token, prompt_len
 
     def _generate_loop_cpu(
         self,

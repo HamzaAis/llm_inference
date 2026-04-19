@@ -37,13 +37,13 @@ class Settings(BaseSettings):
     model_name: str = "mistralai/Ministral-3-3B-Instruct-2512-ONNX"
     model_provider: str = "cuda"  # cpu, cuda
     model_verbose: bool = False
-    # ONNX weight/activation precision variant to download from HF. Common
-    # values for Transformers.js-style exports:
-    #   q4f16      - 4-bit weights + fp16 activations + fp16 KV cache (fast on CUDA)
-    #   q4         - 4-bit weights + fp32 activations + fp32 KV cache (fast on CPU)
-    #   fp16       - fp16 everywhere (bigger, still fast on CUDA)
-    #   quantized  - int8 weights (smallest, decent on CPU)
     model_precision: str = "q4f16"
+
+    vl_system_prompt: str = (
+        "You extract fields from images. Return COMPACT minified JSON on a single line, "
+        "no whitespace or newlines. Use null for missing values. "
+        "Copy text exactly as shown. Do not invent fields or repeat patterns."
+    )
 
     text_temperature: float = 1.0
     text_top_p: float = 1.0
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     default_max_new_tokens: int = 512
     max_new_tokens_ceiling: int = 4096
     max_image_mb: int = 10
-    image_max_side: int = 768
+    image_max_side: int = 512
     allowed_image_mimes: tuple[str, ...] = (
         "image/png",
         "image/jpeg",

@@ -44,6 +44,7 @@ def build_model_service(settings: Settings) -> ModelService:
         image_max_side=settings.image_max_side,
         text_sampling=text_profile,
         vl_sampling=vl_profile,
+        vl_system_prompt=settings.vl_system_prompt,
     )
 
 
