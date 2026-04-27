@@ -1,4 +1,4 @@
-from src.presentation.schemas.common import ErrorResponse, HealthResponse
+from src.presentation.schemas.common import ErrorResponse
 from src.presentation.schemas.inference import (
     InferenceCreateForm,
     InferenceListResponse,
@@ -8,7 +8,6 @@ from src.presentation.schemas.inference import (
 
 __all__ = [
     "ErrorResponse",
-    "HealthResponse",
     "InferenceCreateForm",
     "InferenceListResponse",
     "InferenceResponse",

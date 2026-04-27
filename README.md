@@ -63,7 +63,7 @@ llm_inferance/
       config/               settings, database, dependency injection
       middleware/           access log, rate limit
     presentation/
-      endpoints/            health, inferences
+      endpoints/            inferences
       schemas/              pydantic request/response models
 ```
 
@@ -96,13 +96,12 @@ llm_inferance/
 
 ## Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET`  | `/health` | Returns `{status, model_loaded, model_name}`. |
-| `POST` | `/inferences` | multipart: `prompt` (required), `image` (optional), `max_new_tokens` (optional). Generates text and persists. |
-| `GET`  | `/inferences` | Paginated list of past inferences (`?page=`, `?page_size=`). |
-| `GET`  | `/inferences/{id}` | Full inference detail. |
-| `GET`  | `/inferences/{id}/image` | Returns the stored image (404 if no image). |
+| Method | Path                     | Description                                                                                                   |
+| ------ | ------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `POST` | `/inferences`            | multipart: `prompt` (required), `image` (optional), `max_new_tokens` (optional). Generates text and persists. |
+| `GET`  | `/inferences`            | Paginated list of past inferences (`?page=`, `?page_size=`).                                                  |
+| `GET`  | `/inferences/{id}`       | Full inference detail.                                                                                        |
+| `GET`  | `/inferences/{id}/image` | Returns the stored image (404 if no image).                                                                   |
 
 ### Quick examples
 
@@ -134,23 +133,23 @@ curl.exe http://localhost:8000/inferences/1/image -o downloaded.jpg
 All settings can be overridden via environment variables (or a `.env` file
 at the project root). Key defaults:
 
-| Variable | Default |
-|----------|---------|
-| `APP_HOST` | `0.0.0.0` |
-| `APP_PORT` | `8000` |
-| `MODEL_NAME` | `bartowski/Qwen_Qwen3.5-2B-GGUF` (HF repo id; also used as the display label in `/health`) |
-| `MODEL_GGUF_FILENAME` | `Qwen_Qwen3.5-2B-Q4_K_M.gguf` |
-| `MODEL_MMPROJ_FILENAME` | `mmproj-Qwen_Qwen3.5-2B-f16.gguf` |
-| `MODEL_N_CTX` | `8192` (context window) |
-| `MODEL_N_THREADS` | `0` (0 = all logical cores) |
-| `MODEL_N_GPU_LAYERS` | `0` (increase when using a GPU-accelerated rebuild) |
-| `MODEL_VERBOSE` | `False` (set to `true` to see `llama.cpp` init/timing logs) |
-| `DEFAULT_MAX_NEW_TOKENS` | `512` |
-| `MAX_IMAGE_MB` | `10` |
-| `IMAGE_MAX_SIDE` | `768` (px on the longest side; safety net downscaling before the mmproj) |
-| `ALLOWED_IMAGE_MIMES` | `image/png, image/jpeg, image/webp` |
-| `RATE_LIMIT_PER_MINUTE` | `30` |
-| `DATABASE_URL` | `sqlite+aiosqlite:///./data/llm_inferance.db` |
+| Variable                 | Default                                                                  |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `APP_HOST`               | `0.0.0.0`                                                                |
+| `APP_PORT`               | `8000`                                                                   |
+| `MODEL_NAME`             | `bartowski/Qwen_Qwen3.5-2B-GGUF`                                         |
+| `MODEL_GGUF_FILENAME`    | `Qwen_Qwen3.5-2B-Q4_K_M.gguf`                                            |
+| `MODEL_MMPROJ_FILENAME`  | `mmproj-Qwen_Qwen3.5-2B-f16.gguf`                                        |
+| `MODEL_N_CTX`            | `8192` (context window)                                                  |
+| `MODEL_N_THREADS`        | `0` (0 = all logical cores)                                              |
+| `MODEL_N_GPU_LAYERS`     | `0` (increase when using a GPU-accelerated rebuild)                      |
+| `MODEL_VERBOSE`          | `False` (set to `true` to see `llama.cpp` init/timing logs)              |
+| `DEFAULT_MAX_NEW_TOKENS` | `512`                                                                    |
+| `MAX_IMAGE_MB`           | `10`                                                                     |
+| `IMAGE_MAX_SIDE`         | `768` (px on the longest side; safety net downscaling before the mmproj) |
+| `ALLOWED_IMAGE_MIMES`    | `image/png, image/jpeg, image/webp`                                      |
+| `RATE_LIMIT_PER_MINUTE`  | `30`                                                                     |
+| `DATABASE_URL`           | `sqlite+aiosqlite:///./data/llm_inferance.db`                            |
 
 ### Sampling (Qwen-recommended, overridable)
 
@@ -159,14 +158,14 @@ includes an image. These defaults are the **official Qwen3.5 non-thinking
 settings** and are the single biggest lever against the 2B model's
 repetition/thinking loops.
 
-| Variable | Default (text) | Default (VL) |
-|----------|----------------|--------------|
-| `TEXT_TEMPERATURE` / `VL_TEMPERATURE` | `1.0` | `0.7` |
-| `TEXT_TOP_P` / `VL_TOP_P` | `1.0` | `0.8` |
-| `TEXT_TOP_K` / `VL_TOP_K` | `20` | `20` |
-| `TEXT_MIN_P` / `VL_MIN_P` | `0.0` | `0.0` |
-| `TEXT_PRESENCE_PENALTY` / `VL_PRESENCE_PENALTY` | `2.0` | `1.5` |
-| `TEXT_REPEAT_PENALTY` / `VL_REPEAT_PENALTY` | `1.0` | `1.0` |
+| Variable                                        | Default (text) | Default (VL) |
+| ----------------------------------------------- | -------------- | ------------ |
+| `TEXT_TEMPERATURE` / `VL_TEMPERATURE`           | `1.0`          | `0.7`        |
+| `TEXT_TOP_P` / `VL_TOP_P`                       | `1.0`          | `0.8`        |
+| `TEXT_TOP_K` / `VL_TOP_K`                       | `20`           | `20`         |
+| `TEXT_MIN_P` / `VL_MIN_P`                       | `0.0`          | `0.0`        |
+| `TEXT_PRESENCE_PENALTY` / `VL_PRESENCE_PENALTY` | `2.0`          | `1.5`        |
+| `TEXT_REPEAT_PENALTY` / `VL_REPEAT_PENALTY`     | `1.0`          | `1.0`        |
 
 The `VL_*` profile is used whenever an `image` multipart part is attached; the
 `TEXT_*` profile is used otherwise. The selected profile and its temperature /

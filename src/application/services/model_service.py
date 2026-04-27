@@ -93,7 +93,7 @@ class ModelService:
         from transformers import AutoConfig, AutoProcessor
 
         self._hf_cache_dir.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("HF_HOME", str(self._hf_cache_dir))
+        os.environ["HF_HOME"] = str(self._hf_cache_dir)
 
         self._logger.info(
             "loading model repo=%s provider=%s precision=%s",
