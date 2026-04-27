@@ -37,13 +37,25 @@ class Settings(BaseSettings):
     model_name: str = "mistralai/Ministral-3-3B-Instruct-2512-ONNX"
     model_provider: str = "cuda"  # cpu, cuda
     model_verbose: bool = False
-    # ONNX weight/activation precision variant to download from HF. Common
-    # values for Transformers.js-style exports:
-    #   q4f16      - 4-bit weights + fp16 activations + fp16 KV cache (fast on CUDA)
-    #   q4         - 4-bit weights + fp32 activations + fp32 KV cache (fast on CPU)
-    #   fp16       - fp16 everywhere (bigger, still fast on CUDA)
-    #   quantized  - int8 weights (smallest, decent on CPU)
     model_precision: str = "q4f16"
+
+    # Experimental: patch the decoder ONNX graph to set
+    # past_present_share_buffer=1 on every GroupQueryAttention node.
+    # Enables static KV shapes + in-place KV writes, which unlocks ORT CUDA
+    # graph capture for ~30-50% faster decode on CUDA. Requires the
+    # generation loop to preallocate KV cache at max context size.
+    # Off by default so the stable path keeps working.
+    model_shared_kv: bool = False
+    model_max_context: int = 2048
+    # When shared_kv is on, enable ORT CUDA Graph capture for the decode session.
+    # Harmless to leave on; ORT falls back if shapes still vary.
+    model_cuda_graph: bool = True
+
+    vl_system_prompt: str = (
+        "You extract fields from images. Return COMPACT minified JSON on a single line, "
+        "no whitespace or newlines. Use null for missing values. "
+        "Copy text exactly as shown. Do not invent fields or repeat patterns."
+    )
 
     text_temperature: float = 1.0
     text_top_p: float = 1.0
@@ -62,7 +74,7 @@ class Settings(BaseSettings):
     default_max_new_tokens: int = 512
     max_new_tokens_ceiling: int = 4096
     max_image_mb: int = 10
-    image_max_side: int = 768
+    image_max_side: int = 512
     allowed_image_mimes: tuple[str, ...] = (
         "image/png",
         "image/jpeg",

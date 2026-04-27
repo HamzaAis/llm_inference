@@ -17,7 +17,6 @@ from src.infrastructure.config.dependency import (
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.middleware.logger import AccessLogMiddleware, configure_logging
 from src.infrastructure.middleware.rate_limit import attach_rate_limiter, build_limiter
-from src.presentation.endpoints.health import router as health_router
 from src.presentation.endpoints.inferences import router as inferences_router
 
 
@@ -69,7 +68,6 @@ def create_app() -> FastAPI:
     limiter = build_limiter(settings.rate_limit_per_minute)
     attach_rate_limiter(app, limiter)
 
-    app.include_router(health_router)
     app.include_router(inferences_router)
 
     return app
@@ -81,7 +79,7 @@ app = create_app()
 def main() -> None:
     settings = get_settings()
     uvicorn.run(
-        "src.main:app",
+        "main:app",
         host=settings.app_host,
         port=settings.app_port,
         reload=False,

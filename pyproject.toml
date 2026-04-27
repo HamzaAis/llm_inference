@@ -1,5 +1,5 @@
 [project]
-name = "llm-inferance"
+name = "llm-inference"
 version = "0.1.0"
 description = "Clean-architecture FastAPI server for Ministral-3-3B vision-language inference on CPU via ONNX Runtime."
 readme = "README.md"
