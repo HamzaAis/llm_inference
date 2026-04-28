@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,9 @@ from src.application.dataclasses.inference import (
 )
 from src.domain.entities.inference import Inference
 from src.domain.enums import InferenceStatus
+from src.infrastructure.middleware import setup_logger
+
+logger = setup_logger(__name__)
 
 
 class InferenceRepository:
@@ -19,6 +23,9 @@ class InferenceRepository:
         self._session = session
 
     async def create(self, draft: InferenceDraft) -> InferenceRecord:
+        t0 = time.perf_counter()
+
+        t_step = time.perf_counter()
         entity = Inference(
             status=draft.status,
             query=draft.query,
@@ -27,11 +34,33 @@ class InferenceRepository:
             guided_json=json.dumps(draft.guided_json) if draft.guided_json else None,
             latency_ms=draft.latency_ms,
         )
+        logger.info("repository: build entity elapsed_ms=%.2f",
+                   (time.perf_counter() - t_step) * 1000)
+
+        t_step = time.perf_counter()
         self._session.add(entity)
         await self._session.flush()
+        logger.info("repository: session flush elapsed_ms=%.2f",
+                   (time.perf_counter() - t_step) * 1000)
+
+        t_step = time.perf_counter()
         await self._session.refresh(entity)
+        logger.info("repository: session refresh elapsed_ms=%.2f",
+                   (time.perf_counter() - t_step) * 1000)
+
+        t_step = time.perf_counter()
         await self._session.commit()
-        return self._to_record(entity)
+        logger.info("repository: session commit elapsed_ms=%.2f",
+                   (time.perf_counter() - t_step) * 1000)
+
+        t_step = time.perf_counter()
+        record = self._to_record(entity)
+        logger.info("repository: to_record conversion elapsed_ms=%.2f",
+                   (time.perf_counter() - t_step) * 1000)
+
+        logger.info("repository: create total elapsed_ms=%.2f",
+                   (time.perf_counter() - t0) * 1000)
+        return record
 
     async def get_by_id(self, inference_id: int) -> InferenceRecord | None:
         entity = await self._session.get(Inference, inference_id)

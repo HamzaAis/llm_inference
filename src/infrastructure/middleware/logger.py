@@ -32,7 +32,7 @@ def setup_logger(name: str) -> logging.Logger:
         handler.addFilter(RequestIDFilter())
 
         formatter = logging.Formatter(
-            '%(asctime)s - [%(request_id)s] - %(name)s - %(levelname)s - %(message)s',
+            '%(asctime)s.%(msecs)03d - [%(request_id)s] - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         handler.setFormatter(formatter)
@@ -81,8 +81,8 @@ def configure_logging(level: int = logging.INFO) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(
         logging.Formatter(
-            fmt="%(asctime)s %(levelname)s %(name)s :: %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S%z",
+            fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s :: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
         )
     )
     root.addHandler(handler)

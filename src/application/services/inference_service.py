@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone, timedelta
 from src.application.dataclasses.inference import (
@@ -13,6 +14,9 @@ from src.application.utils.image_processor import ImageProcessor
 from src.domain.repositories.inference_repository import InferenceRepository
 from src.domain.enums import InferenceStatus
 from src.infrastructure.config.settings import get_settings
+from src.infrastructure.middleware import setup_logger
+
+logger = setup_logger(__name__)
 
 
 class InferenceService:
@@ -27,13 +31,19 @@ class InferenceService:
         self._image_processor = image_processor
 
     async def create(self, request: InferenceCreateRequest) -> InferenceRecord:
-        start_time = time.time()
+        t0 = time.perf_counter()
+        logger.info("service: create started query_len=%d num_images=%d",
+                   len(request.query or ""), len(request.images or []))
 
         try:
+            t_step = time.perf_counter()
             preprocessed_images = None
             if request.images:
                 preprocessed_images = await self._image_processor.preprocess_images_async(request.images)
+            logger.info("service: image preprocessing elapsed_ms=%.2f",
+                       (time.perf_counter() - t_step) * 1000)
 
+            t_step = time.perf_counter()
             settings = get_settings()
 
             output = await self._onnx_client.generate(
@@ -42,8 +52,10 @@ class InferenceService:
                 guided_json=request.guided_json,
                 max_new_tokens=settings.default_max_new_tokens,
             )
+            logger.info("service: onnx generate elapsed_ms=%.2f",
+                       (time.perf_counter() - t_step) * 1000)
 
-            latency_ms = (time.time() - start_time) * 1000
+            latency_ms = (time.perf_counter() - t0) * 1000
 
             draft = InferenceDraft(
                 status=InferenceStatus.COMPLETED,
@@ -53,11 +65,19 @@ class InferenceService:
                 guided_json=request.guided_json,
                 latency_ms=latency_ms,
             )
-            return await self._repository.create(draft)
+
+            t_step = time.perf_counter()
+            record = await self._repository.create(draft)
+            logger.info("service: repository create elapsed_ms=%.2f",
+                       (time.perf_counter() - t_step) * 1000)
+
+            logger.info("service: create completed total_ms=%.2f", latency_ms)
+            return record
 
         except Exception as e:
-            latency_ms = (time.time() - start_time) * 1000
+            latency_ms = (time.perf_counter() - t0) * 1000
             error_output = f"Error: {str(e)}"
+            logger.error("service: create failed elapsed_ms=%.2f error=%s", latency_ms, str(e))
 
             draft = InferenceDraft(
                 status=InferenceStatus.FAILED,
