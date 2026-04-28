@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from sqlalchemy import desc, func, select
+from datetime import datetime
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.dataclasses.inference import (
@@ -86,6 +87,18 @@ class InferenceRepository:
         stmt = select(func.max(Inference.latency_ms)).where(Inference.latency_ms.isnot(None))
         result = await self._session.execute(stmt)
         return result.scalar_one()
+
+    async def delete_by_id(self, inference_id: int) -> bool:
+        stmt = delete(Inference).where(Inference.id == inference_id)
+        result = await self._session.execute(stmt)
+        await self._session.commit()
+        return result.rowcount > 0
+
+    async def delete_older_than(self, cutoff_date: datetime) -> int:
+        stmt = delete(Inference).where(Inference.created_at < cutoff_date)
+        result = await self._session.execute(stmt)
+        await self._session.commit()
+        return result.rowcount
 
     @staticmethod
     def _to_record(entity: Inference) -> InferenceRecord:
