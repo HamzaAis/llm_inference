@@ -1,9 +1,12 @@
-from src.infrastructure.middleware.logger import AccessLogMiddleware, configure_logging
-from src.infrastructure.middleware.rate_limit import attach_rate_limiter, build_limiter
+from src.infrastructure.middleware.logger import AccessLogMiddleware, configure_logging, setup_logger
+from src.infrastructure.middleware.rate_limit import RateLimitMiddleware
+from src.infrastructure.middleware.request_id import RequestIDMiddleware, get_request_id
 
 __all__ = [
     "AccessLogMiddleware",
-    "attach_rate_limiter",
-    "build_limiter",
+    "RateLimitMiddleware",
+    "RequestIDMiddleware",
     "configure_logging",
+    "setup_logger",
+    "get_request_id",
 ]

@@ -33,6 +33,15 @@ def init_engine(settings: Settings) -> AsyncEngine:
     return _engine
 
 
+async def init_db() -> None:
+    from src.domain.entities.inference import Inference
+    if _engine is None:
+        raise RuntimeError("database engine is not initialised")
+    async with _engine.begin() as conn:
+        from src.domain.entities.base import Base
+        await conn.run_sync(Base.metadata.create_all)
+
+
 async def dispose_engine() -> None:
     global _engine, _session_factory
     if _engine is not None:

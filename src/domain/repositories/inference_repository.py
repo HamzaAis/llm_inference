@@ -9,7 +9,7 @@ from src.application.dataclasses.inference import (
     InferencePage,
     InferenceRecord,
 )
-from src.domain.models.inference import Inference
+from src.domain.entities.inference import Inference
 
 
 class InferenceRepository:
