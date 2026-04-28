@@ -9,12 +9,14 @@ from src.application.dataclasses.generation import SamplingProfile
 from src.application.services.inference_service import InferenceService
 from src.application.services.model_service import ModelService
 from src.application.utils.image_processor import ImageProcessor
+from src.application.utils.onnx_client import OnnxClient
 from src.domain.repositories.inference_repository import InferenceRepository
 from src.infrastructure.config.database import get_session
 from src.infrastructure.config.settings import Settings, get_settings
 
 
 _model_service: ModelService | None = None
+_onnx_client: OnnxClient | None = None
 
 
 def build_model_service(settings: Settings) -> ModelService:
@@ -51,13 +53,15 @@ def build_model_service(settings: Settings) -> ModelService:
 
 
 def set_model_service(service: ModelService) -> None:
-    global _model_service
+    global _model_service, _onnx_client
     _model_service = service
+    _onnx_client = OnnxClient(service)
 
 
 def clear_model_service() -> None:
-    global _model_service
+    global _model_service, _onnx_client
     _model_service = None
+    _onnx_client = None
 
 
 def provide_settings() -> Settings:
@@ -68,6 +72,12 @@ def provide_model_service() -> ModelService:
     if _model_service is None:
         raise RuntimeError("model service is not initialised")
     return _model_service
+
+
+def provide_onnx_client() -> OnnxClient:
+    if _onnx_client is None:
+        raise RuntimeError("onnx client is not initialised")
+    return _onnx_client
 
 
 def provide_inference_repository(
@@ -89,12 +99,12 @@ def provide_image_processor(
 
 def provide_inference_service(
     repository: Annotated[InferenceRepository, Depends(provide_inference_repository)],
-    model_service: Annotated[ModelService, Depends(provide_model_service)],
+    onnx_client: Annotated[OnnxClient, Depends(provide_onnx_client)],
     image_processor: Annotated[ImageProcessor, Depends(provide_image_processor)],
 ) -> InferenceService:
     return InferenceService(
         repository=repository,
-        model_service=model_service,
+        onnx_client=onnx_client,
         image_processor=image_processor,
     )
 

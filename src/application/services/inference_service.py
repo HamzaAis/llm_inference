@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import time
-from src.application.dataclasses.generation import GenerationRequest
 from src.application.dataclasses.inference import (
     InferenceCreateRequest,
     InferenceDraft,
     InferencePage,
     InferenceRecord,
 )
-from src.application.services.model_service import ModelService
+from src.application.utils.onnx_client import OnnxClient
 from src.application.utils.image_processor import ImageProcessor
 from src.domain.repositories.inference_repository import InferenceRepository
 from src.infrastructure.config.settings import get_settings
@@ -18,11 +17,11 @@ class InferenceService:
     def __init__(
         self,
         repository: InferenceRepository,
-        model_service: ModelService,
+        onnx_client: OnnxClient,
         image_processor: ImageProcessor,
     ) -> None:
         self._repository = repository
-        self._model_service = model_service
+        self._onnx_client = onnx_client
         self._image_processor = image_processor
 
     async def create(self, request: InferenceCreateRequest) -> InferenceRecord:
@@ -33,12 +32,12 @@ class InferenceService:
             preprocessed_images = await self._image_processor.preprocess_images_async(request.images)
 
         settings = get_settings()
-        generation = await self._model_service.generate(
-            GenerationRequest(
-                prompt=request.query or "",
-                image_absolute_path=None,
-                max_new_tokens=settings.default_max_new_tokens,
-            )
+
+        output = await self._onnx_client.generate(
+            query=request.query,
+            images=preprocessed_images,
+            guided_json=request.guided_json,
+            max_new_tokens=settings.default_max_new_tokens,
         )
 
         latency_ms = (time.time() - start_time) * 1000
@@ -46,7 +45,7 @@ class InferenceService:
         draft = InferenceDraft(
             query=request.query,
             images=preprocessed_images,
-            output=generation.text,
+            output=output,
             guided_json=request.guided_json,
             latency_ms=latency_ms,
         )
