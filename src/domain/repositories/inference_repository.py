@@ -10,6 +10,7 @@ from src.application.dataclasses.inference import (
     InferenceRecord,
 )
 from src.domain.entities.inference import Inference
+from src.domain.enums import InferenceStatus
 
 
 class InferenceRepository:
@@ -18,6 +19,7 @@ class InferenceRepository:
 
     async def create(self, draft: InferenceDraft) -> InferenceRecord:
         entity = Inference(
+            status=draft.status,
             query=draft.query,
             images=json.dumps(draft.images) if draft.images else None,
             output=draft.output,
@@ -65,7 +67,7 @@ class InferenceRepository:
 
     async def count_successful(self) -> int:
         stmt = select(func.count()).select_from(Inference).where(
-            ~Inference.output.startswith("Error:")
+            Inference.status == InferenceStatus.COMPLETED
         )
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
@@ -89,6 +91,7 @@ class InferenceRepository:
     def _to_record(entity: Inference) -> InferenceRecord:
         return InferenceRecord(
             id=entity.id,
+            status=InferenceStatus(entity.status),
             query=entity.query,
             images=json.loads(entity.images) if entity.images else None,
             output=entity.output,

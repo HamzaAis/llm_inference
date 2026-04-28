@@ -11,6 +11,7 @@ from src.application.dataclasses.inference import (
 from src.application.utils.onnx_client import OnnxClient
 from src.application.utils.image_processor import ImageProcessor
 from src.domain.repositories.inference_repository import InferenceRepository
+from src.domain.enums import InferenceStatus
 from src.infrastructure.config.settings import get_settings
 
 
@@ -28,29 +29,46 @@ class InferenceService:
     async def create(self, request: InferenceCreateRequest) -> InferenceRecord:
         start_time = time.time()
 
-        preprocessed_images = None
-        if request.images:
-            preprocessed_images = await self._image_processor.preprocess_images_async(request.images)
+        try:
+            preprocessed_images = None
+            if request.images:
+                preprocessed_images = await self._image_processor.preprocess_images_async(request.images)
 
-        settings = get_settings()
+            settings = get_settings()
 
-        output = await self._onnx_client.generate(
-            query=request.query,
-            images=preprocessed_images,
-            guided_json=request.guided_json,
-            max_new_tokens=settings.default_max_new_tokens,
-        )
+            output = await self._onnx_client.generate(
+                query=request.query,
+                images=preprocessed_images,
+                guided_json=request.guided_json,
+                max_new_tokens=settings.default_max_new_tokens,
+            )
 
-        latency_ms = (time.time() - start_time) * 1000
+            latency_ms = (time.time() - start_time) * 1000
 
-        draft = InferenceDraft(
-            query=request.query,
-            images=preprocessed_images,
-            output=output,
-            guided_json=request.guided_json,
-            latency_ms=latency_ms,
-        )
-        return await self._repository.create(draft)
+            draft = InferenceDraft(
+                status=InferenceStatus.COMPLETED,
+                query=request.query,
+                images=preprocessed_images,
+                output=output,
+                guided_json=request.guided_json,
+                latency_ms=latency_ms,
+            )
+            return await self._repository.create(draft)
+
+        except Exception as e:
+            latency_ms = (time.time() - start_time) * 1000
+            error_output = f"Error: {str(e)}"
+
+            draft = InferenceDraft(
+                status=InferenceStatus.FAILED,
+                query=request.query,
+                images=request.images,
+                output=error_output,
+                guided_json=request.guided_json,
+                latency_ms=latency_ms,
+            )
+            record = await self._repository.create(draft)
+            raise
 
     async def get(self, inference_id: int) -> InferenceRecord | None:
         return await self._repository.get_by_id(inference_id)
