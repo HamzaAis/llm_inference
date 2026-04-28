@@ -26,9 +26,6 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default=f"sqlite+aiosqlite:///{(PROJECT_ROOT / 'data' / 'llm_inferance.db').as_posix()}"
     )
-    sync_database_url: str = Field(
-        default=f"sqlite:///{(PROJECT_ROOT / 'data' / 'llm_inferance.db').as_posix()}"
-    )
 
     data_dir: Path = PROJECT_ROOT / "data"
     hf_cache_dir: Path = PROJECT_ROOT / "hf_cache"

@@ -44,7 +44,7 @@ class ImageProcessor:
         if not images:
             return images
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with ThreadPoolExecutor(max_workers=3) as executor:
             tasks = [
                 loop.run_in_executor(executor, self.preprocess_image, img)

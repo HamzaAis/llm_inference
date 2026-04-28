@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 import aiofiles
+import aiofiles.os
+import anyio
 
 from src.application.dataclasses.generation import GenerationRequest
 from src.application.services.model_service import ModelService
@@ -62,15 +64,20 @@ class OnnxClient:
             raise OnnxGenerationError(f"ONNX generation failed: {str(e)}")
 
         finally:
-            if temp_image_path and temp_image_path.exists():
-                temp_image_path.unlink()
+            if temp_image_path and await aiofiles.os.path.exists(str(temp_image_path)):
+                await aiofiles.os.remove(str(temp_image_path))
 
     async def _save_temp_image(self, image_b64: str) -> Path:
         """Save base64 image to temporary file asynchronously."""
         img_data = base64.b64decode(image_b64)
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-        temp_path = Path(temp_file.name)
-        temp_file.close()
+
+        def _create_temp() -> str:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+            path = temp_file.name
+            temp_file.close()
+            return path
+
+        temp_path = Path(await anyio.to_thread.run_sync(_create_temp))
 
         async with aiofiles.open(temp_path, 'wb') as f:
             await f.write(img_data)

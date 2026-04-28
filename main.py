@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -22,8 +23,8 @@ from src.presentation.endpoints import inferences_router
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.hf_cache_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(lambda: settings.data_dir.mkdir(parents=True, exist_ok=True))
+    await asyncio.to_thread(lambda: settings.hf_cache_dir.mkdir(parents=True, exist_ok=True))
 
     init_engine(settings)
     await init_db()
