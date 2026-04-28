@@ -16,7 +16,7 @@ from src.infrastructure.config.dependency import (
 )
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.middleware import AccessLogMiddleware, configure_logging, RateLimitMiddleware, RequestIDMiddleware
-from src.presentation.endpoints.inferences import router as inferences_router
+from src.presentation.endpoints import inferences_router
 
 
 @asynccontextmanager

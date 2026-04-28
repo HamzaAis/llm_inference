@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from src.application.dataclasses.inference import InferenceCreateRequest
 from src.infrastructure.config.dependency import InferenceServiceDep
 from src.presentation.schemas.common import ErrorResponse
-from src.presentation.schemas.inference import (
+from src.presentation.schemas.inference_schemas import (
     InferenceDetail,
     InferenceListResponse,
     InferenceRequest,
@@ -72,3 +72,26 @@ async def get_inference(
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="inference not found")
     return InferenceDetail.from_record(record)
+
+
+@router.delete("/{inference_id}")
+async def delete_inference(
+    inference_id: int,
+    inference_service: InferenceServiceDep,
+):
+    success = await inference_service.delete_by_id(inference_id)
+    if not success:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="inference not found")
+    return {"message": "Inference deleted successfully"}
+
+
+@router.delete("")
+async def bulk_delete_inferences(
+    older_than_days: Annotated[int, Query(ge=1)],
+    inference_service: InferenceServiceDep,
+):
+    deleted_count, cutoff_date = await inference_service.bulk_delete(older_than_days)
+    return {
+        "deleted_count": deleted_count,
+        "cutoff_date": cutoff_date
+    }

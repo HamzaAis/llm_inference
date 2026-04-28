@@ -1,5 +1,5 @@
 from src.presentation.schemas.common import ErrorResponse
-from src.presentation.schemas.inference import (
+from src.presentation.schemas.inference_schemas import (
     InferenceListResponse,
     InferenceResponse,
     InferenceSummary,

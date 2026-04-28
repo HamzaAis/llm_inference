@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone, timedelta
 from src.application.dataclasses.inference import (
     InferenceCreateRequest,
     InferenceDraft,
@@ -56,6 +57,14 @@ class InferenceService:
 
     async def list_page(self, page: int, page_size: int) -> InferencePage:
         return await self._repository.list_paginated(page=page, page_size=page_size)
+
+    async def delete_by_id(self, inference_id: int) -> bool:
+        return await self._repository.delete_by_id(inference_id)
+
+    async def bulk_delete(self, older_than_days: int) -> tuple[int, datetime]:
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        deleted_count = await self._repository.delete_older_than(cutoff_date)
+        return deleted_count, cutoff_date
 
     async def get_metrics(self) -> dict:
         total_runs = await self._repository.count_all()
