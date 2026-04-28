@@ -16,7 +16,7 @@ from src.infrastructure.config.dependency import (
     set_model_service,
 )
 from src.infrastructure.config.settings import get_settings
-from src.infrastructure.middleware import AccessLogMiddleware, configure_logging, RateLimitMiddleware, RequestIDMiddleware
+from src.infrastructure.middleware import AccessLogMiddleware, configure_logging, RateLimitMiddleware, RequestIDMiddleware, TimingMiddleware
 from src.presentation.endpoints import inferences_router
 
 
@@ -63,9 +63,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(AccessLogMiddleware)
+    app.add_middleware(TimingMiddleware)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestIDMiddleware)
-    app.add_middleware(AccessLogMiddleware)
 
     app.include_router(inferences_router)
 
