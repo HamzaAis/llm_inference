@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     app_name: str = "llm-inferance"
     app_host: str = "0.0.0.0"
-    app_port: int = 8000
+    app_port: int = 10000
     app_debug: bool = False
 
     database_url: str = Field(
