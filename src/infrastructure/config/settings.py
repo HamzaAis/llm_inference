@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     )
 
     data_dir: Path = PROJECT_ROOT / "data"
-    files_dir: Path = PROJECT_ROOT / "files"
     hf_cache_dir: Path = PROJECT_ROOT / "hf_cache"
 
     model_name: str = "mistralai/Ministral-3-3B-Instruct-2512-ONNX"
@@ -74,12 +73,13 @@ class Settings(BaseSettings):
     default_max_new_tokens: int = 512
     max_new_tokens_ceiling: int = 4096
     max_image_mb: int = 10
-    image_max_side: int = 512
-    allowed_image_mimes: tuple[str, ...] = (
-        "image/png",
-        "image/jpeg",
-        "image/webp",
-    )
+    max_images: int = 3
+    max_query_length: int = 10000
+
+    image_max_width: int = 1280
+    image_max_height: int = 720
+    image_dpi: int = 150
+    image_jpeg_quality: int = 80
 
     rate_limit_per_minute: int = 30
     cors_allow_origins: tuple[str, ...] = ("*",)

@@ -1,5 +1,4 @@
 from src.application.dataclasses.generation import GenerationRequest, GenerationResult
-from src.application.dataclasses.image import ImageUpload, StoredImage
 from src.application.dataclasses.inference import (
     InferenceCreateRequest,
     InferenceDraft,
@@ -10,8 +9,6 @@ from src.application.dataclasses.inference import (
 __all__ = [
     "GenerationRequest",
     "GenerationResult",
-    "ImageUpload",
-    "StoredImage",
     "InferenceCreateRequest",
     "InferenceDraft",
     "InferencePage",

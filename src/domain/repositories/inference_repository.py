@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,7 +9,7 @@ from src.application.dataclasses.inference import (
     InferencePage,
     InferenceRecord,
 )
-from src.domain.models.inference import Inference
+from src.domain.entities.inference import Inference
 
 
 class InferenceRepository:
@@ -17,12 +18,10 @@ class InferenceRepository:
 
     async def create(self, draft: InferenceDraft) -> InferenceRecord:
         entity = Inference(
-            prompt=draft.prompt,
-            response=draft.response,
-            image_path=draft.image_relative_path,
-            image_filename=draft.image_filename,
-            image_mime=draft.image_mime,
-            max_new_tokens=draft.max_new_tokens,
+            query=draft.query,
+            images=json.dumps(draft.images) if draft.images else None,
+            output=draft.output,
+            guided_json=json.dumps(draft.guided_json) if draft.guided_json else None,
             latency_ms=draft.latency_ms,
         )
         self._session.add(entity)
@@ -59,16 +58,41 @@ class InferenceRepository:
             total=total,
         )
 
+    async def count_all(self) -> int:
+        stmt = select(func.count()).select_from(Inference)
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def count_successful(self) -> int:
+        stmt = select(func.count()).select_from(Inference).where(
+            ~Inference.output.startswith("Error:")
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def get_average_latency(self) -> float | None:
+        stmt = select(func.avg(Inference.latency_ms)).where(Inference.latency_ms.isnot(None))
+        result = await self._session.execute(stmt)
+        return result.scalar_one()
+
+    async def get_min_latency(self) -> float | None:
+        stmt = select(func.min(Inference.latency_ms)).where(Inference.latency_ms.isnot(None))
+        result = await self._session.execute(stmt)
+        return result.scalar_one()
+
+    async def get_max_latency(self) -> float | None:
+        stmt = select(func.max(Inference.latency_ms)).where(Inference.latency_ms.isnot(None))
+        result = await self._session.execute(stmt)
+        return result.scalar_one()
+
     @staticmethod
     def _to_record(entity: Inference) -> InferenceRecord:
         return InferenceRecord(
             id=entity.id,
-            prompt=entity.prompt,
-            response=entity.response,
-            image_relative_path=entity.image_path,
-            image_filename=entity.image_filename,
-            image_mime=entity.image_mime,
-            max_new_tokens=entity.max_new_tokens,
+            query=entity.query,
+            images=json.loads(entity.images) if entity.images else None,
+            output=entity.output,
+            guided_json=json.loads(entity.guided_json) if entity.guided_json else None,
             latency_ms=entity.latency_ms,
             created_at=entity.created_at,
         )

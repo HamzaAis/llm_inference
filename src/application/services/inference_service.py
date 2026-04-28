@@ -1,53 +1,54 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from src.application.dataclasses.generation import GenerationRequest
+import time
+from datetime import datetime, timezone, timedelta
 from src.application.dataclasses.inference import (
     InferenceCreateRequest,
     InferenceDraft,
     InferencePage,
     InferenceRecord,
 )
-from src.application.services.image_file_service import ImageFileService
-from src.application.services.model_service import ModelService
+from src.application.utils.onnx_client import OnnxClient
+from src.application.utils.image_processor import ImageProcessor
 from src.domain.repositories.inference_repository import InferenceRepository
+from src.infrastructure.config.settings import get_settings
 
 
 class InferenceService:
     def __init__(
         self,
         repository: InferenceRepository,
-        image_service: ImageFileService,
-        model_service: ModelService,
+        onnx_client: OnnxClient,
+        image_processor: ImageProcessor,
     ) -> None:
         self._repository = repository
-        self._image_service = image_service
-        self._model_service = model_service
+        self._onnx_client = onnx_client
+        self._image_processor = image_processor
 
     async def create(self, request: InferenceCreateRequest) -> InferenceRecord:
-        stored_image = None
-        image_absolute_path: str | None = None
-        if request.image is not None:
-            stored_image = self._image_service.store(request.image)
-            image_absolute_path = stored_image.absolute_path
+        start_time = time.time()
 
-        generation = await self._model_service.generate(
-            GenerationRequest(
-                prompt=request.prompt,
-                image_absolute_path=image_absolute_path,
-                max_new_tokens=request.max_new_tokens,
-            )
+        preprocessed_images = None
+        if request.images:
+            preprocessed_images = await self._image_processor.preprocess_images_async(request.images)
+
+        settings = get_settings()
+
+        output = await self._onnx_client.generate(
+            query=request.query,
+            images=preprocessed_images,
+            guided_json=request.guided_json,
+            max_new_tokens=settings.default_max_new_tokens,
         )
 
+        latency_ms = (time.time() - start_time) * 1000
+
         draft = InferenceDraft(
-            prompt=request.prompt,
-            response=generation.text,
-            image_relative_path=stored_image.relative_path if stored_image else None,
-            image_filename=stored_image.filename if stored_image else None,
-            image_mime=stored_image.mime_type if stored_image else None,
-            max_new_tokens=request.max_new_tokens,
-            latency_ms=generation.latency_ms,
+            query=request.query,
+            images=preprocessed_images,
+            output=output,
+            guided_json=request.guided_json,
+            latency_ms=latency_ms,
         )
         return await self._repository.create(draft)
 
@@ -57,5 +58,31 @@ class InferenceService:
     async def list_page(self, page: int, page_size: int) -> InferencePage:
         return await self._repository.list_paginated(page=page, page_size=page_size)
 
-    def resolve_image_path(self, relative_path: str) -> Path | None:
-        return self._image_service.resolve_absolute_path(relative_path)
+    async def delete_by_id(self, inference_id: int) -> bool:
+        return await self._repository.delete_by_id(inference_id)
+
+    async def bulk_delete(self, older_than_days: int) -> tuple[int, datetime]:
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        deleted_count = await self._repository.delete_older_than(cutoff_date)
+        return deleted_count, cutoff_date
+
+    async def get_metrics(self) -> dict:
+        total_runs = await self._repository.count_all()
+        successful_runs = await self._repository.count_successful()
+        failed_runs = total_runs - successful_runs
+
+        success_rate = (successful_runs / total_runs * 100) if total_runs > 0 else 0
+
+        avg_latency = await self._repository.get_average_latency() or 0
+        min_latency = await self._repository.get_min_latency() or 0
+        max_latency = await self._repository.get_max_latency() or 0
+
+        return {
+            "total_runs": total_runs,
+            "successful_runs": successful_runs,
+            "failed_runs": failed_runs,
+            "success_rate": round(success_rate, 2),
+            "average_latency_ms": round(avg_latency, 2),
+            "min_latency_ms": round(min_latency, 2),
+            "max_latency_ms": round(max_latency, 2)
+        }

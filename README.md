@@ -26,7 +26,7 @@ application/dataclasses  (frozen DTOs moving up/down the stack)
 domain/repositories      (SQLAlchemy CRUD + filesystem ops)
   |
   v
-domain/models            (SQLAlchemy ORM)
+domain/entities          (SQLAlchemy ORM)
   |
   v
 data/llm_inferance.db    +    files/<uuid>.<ext>
@@ -44,8 +44,6 @@ Strict rules enforced in code:
 
 ```
 llm_inferance/
-  alembic/                  migrations
-  alembic.ini
   data/                     sqlite db (gitignored)
   files/                    uploaded images (gitignored)
   hf_cache/                 hugging face model cache (gitignored)
@@ -57,11 +55,11 @@ llm_inferance/
       services/             inference / image / model services
     domain/
       enums/
-      models/               sqlalchemy orm
+      entities/             sqlalchemy orm
       repositories/         sqlalchemy + file ops
     infrastructure/
       config/               settings, database, dependency injection
-      middleware/           access log, rate limit
+      middleware/           access log, rate limit, request id
     presentation/
       endpoints/            inferences
       schemas/              pydantic request/response models
@@ -75,13 +73,7 @@ llm_inferance/
    uv sync
    ```
 
-2. Apply database migrations:
-
-   ```powershell
-   uv run alembic upgrade head
-   ```
-
-3. Run the server:
+2. Run the server:
 
    ```powershell
    uv run uvicorn src.main:app --host 0.0.0.0 --port 8000
@@ -92,7 +84,7 @@ llm_inferance/
    ~0.67 GB) from `bartowski/Qwen_Qwen3.5-2B-GGUF` into `hf_cache/`. Subsequent
    launches reuse the cache; model load is typically under 10 seconds on CPU.
 
-4. Open the interactive docs at <http://localhost:8000/docs>.
+3. Open the interactive docs at <http://localhost:8000/docs>.
 
 ## Endpoints
 

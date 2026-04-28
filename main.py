@@ -8,26 +8,25 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.infrastructure.config.database import dispose_engine, init_engine
+from src.infrastructure.config.database import dispose_engine, init_engine, init_db
 from src.infrastructure.config.dependency import (
     build_model_service,
     clear_model_service,
     set_model_service,
 )
 from src.infrastructure.config.settings import get_settings
-from src.infrastructure.middleware.logger import AccessLogMiddleware, configure_logging
-from src.infrastructure.middleware.rate_limit import attach_rate_limiter, build_limiter
-from src.presentation.endpoints.inferences import router as inferences_router
+from src.infrastructure.middleware import AccessLogMiddleware, configure_logging, RateLimitMiddleware, RequestIDMiddleware
+from src.presentation.endpoints import inferences_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.files_dir.mkdir(parents=True, exist_ok=True)
     settings.hf_cache_dir.mkdir(parents=True, exist_ok=True)
 
     init_engine(settings)
+    await init_db()
 
     model_service = build_model_service(settings)
     set_model_service(model_service)
@@ -63,10 +62,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(RequestIDMiddleware)
     app.add_middleware(AccessLogMiddleware)
-
-    limiter = build_limiter(settings.rate_limit_per_minute)
-    attach_rate_limiter(app, limiter)
 
     app.include_router(inferences_router)
 

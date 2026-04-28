@@ -6,16 +6,17 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.dataclasses.generation import SamplingProfile
-from src.application.services.image_file_service import ImageFileService
 from src.application.services.inference_service import InferenceService
 from src.application.services.model_service import ModelService
-from src.domain.repositories.image_file_repository import ImageFileRepository
+from src.application.utils.image_processor import ImageProcessor
+from src.application.utils.onnx_client import OnnxClient
 from src.domain.repositories.inference_repository import InferenceRepository
 from src.infrastructure.config.database import get_session
 from src.infrastructure.config.settings import Settings, get_settings
 
 
 _model_service: ModelService | None = None
+_onnx_client: OnnxClient | None = None
 
 
 def build_model_service(settings: Settings) -> ModelService:
@@ -41,7 +42,7 @@ def build_model_service(settings: Settings) -> ModelService:
         provider=settings.model_provider,
         precision=settings.model_precision,
         verbose=settings.model_verbose,
-        image_max_side=settings.image_max_side,
+        image_max_side=settings.image_max_width,
         text_sampling=text_profile,
         vl_sampling=vl_profile,
         vl_system_prompt=settings.vl_system_prompt,
@@ -52,13 +53,15 @@ def build_model_service(settings: Settings) -> ModelService:
 
 
 def set_model_service(service: ModelService) -> None:
-    global _model_service
+    global _model_service, _onnx_client
     _model_service = service
+    _onnx_client = OnnxClient(service)
 
 
 def clear_model_service() -> None:
-    global _model_service
+    global _model_service, _onnx_client
     _model_service = None
+    _onnx_client = None
 
 
 def provide_settings() -> Settings:
@@ -71,38 +74,38 @@ def provide_model_service() -> ModelService:
     return _model_service
 
 
+def provide_onnx_client() -> OnnxClient:
+    if _onnx_client is None:
+        raise RuntimeError("onnx client is not initialised")
+    return _onnx_client
+
+
 def provide_inference_repository(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> InferenceRepository:
     return InferenceRepository(session)
 
 
-def provide_image_file_repository(
+def provide_image_processor(
     settings: Annotated[Settings, Depends(provide_settings)],
-) -> ImageFileRepository:
-    return ImageFileRepository(settings.files_dir)
-
-
-def provide_image_file_service(
-    settings: Annotated[Settings, Depends(provide_settings)],
-    repository: Annotated[ImageFileRepository, Depends(provide_image_file_repository)],
-) -> ImageFileService:
-    return ImageFileService(
-        repository=repository,
-        allowed_mimes=settings.allowed_image_mimes,
-        max_bytes=settings.max_image_mb * 1024 * 1024,
+) -> ImageProcessor:
+    return ImageProcessor(
+        max_width=settings.image_max_width,
+        max_height=settings.image_max_height,
+        dpi=settings.image_dpi,
+        jpeg_quality=settings.image_jpeg_quality,
     )
 
 
 def provide_inference_service(
     repository: Annotated[InferenceRepository, Depends(provide_inference_repository)],
-    image_service: Annotated[ImageFileService, Depends(provide_image_file_service)],
-    model_service: Annotated[ModelService, Depends(provide_model_service)],
+    onnx_client: Annotated[OnnxClient, Depends(provide_onnx_client)],
+    image_processor: Annotated[ImageProcessor, Depends(provide_image_processor)],
 ) -> InferenceService:
     return InferenceService(
         repository=repository,
-        image_service=image_service,
-        model_service=model_service,
+        onnx_client=onnx_client,
+        image_processor=image_processor,
     )
 
 
