@@ -6,10 +6,9 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.dataclasses.generation import SamplingProfile
-from src.application.services.image_file_service import ImageFileService
 from src.application.services.inference_service import InferenceService
 from src.application.services.model_service import ModelService
-from src.domain.repositories.image_file_repository import ImageFileRepository
+from src.application.utils.image_processor import ImageProcessor
 from src.domain.repositories.inference_repository import InferenceRepository
 from src.infrastructure.config.database import get_session
 from src.infrastructure.config.settings import Settings, get_settings
@@ -41,7 +40,7 @@ def build_model_service(settings: Settings) -> ModelService:
         provider=settings.model_provider,
         precision=settings.model_precision,
         verbose=settings.model_verbose,
-        image_max_side=settings.image_max_side,
+        image_max_side=settings.image_max_width,
         text_sampling=text_profile,
         vl_sampling=vl_profile,
         vl_system_prompt=settings.vl_system_prompt,
@@ -77,32 +76,26 @@ def provide_inference_repository(
     return InferenceRepository(session)
 
 
-def provide_image_file_repository(
+def provide_image_processor(
     settings: Annotated[Settings, Depends(provide_settings)],
-) -> ImageFileRepository:
-    return ImageFileRepository(settings.files_dir)
-
-
-def provide_image_file_service(
-    settings: Annotated[Settings, Depends(provide_settings)],
-    repository: Annotated[ImageFileRepository, Depends(provide_image_file_repository)],
-) -> ImageFileService:
-    return ImageFileService(
-        repository=repository,
-        allowed_mimes=settings.allowed_image_mimes,
-        max_bytes=settings.max_image_mb * 1024 * 1024,
+) -> ImageProcessor:
+    return ImageProcessor(
+        max_width=settings.image_max_width,
+        max_height=settings.image_max_height,
+        dpi=settings.image_dpi,
+        jpeg_quality=settings.image_jpeg_quality,
     )
 
 
 def provide_inference_service(
     repository: Annotated[InferenceRepository, Depends(provide_inference_repository)],
-    image_service: Annotated[ImageFileService, Depends(provide_image_file_service)],
     model_service: Annotated[ModelService, Depends(provide_model_service)],
+    image_processor: Annotated[ImageProcessor, Depends(provide_image_processor)],
 ) -> InferenceService:
     return InferenceService(
         repository=repository,
-        image_service=image_service,
         model_service=model_service,
+        image_processor=image_processor,
     )
 
 

@@ -24,7 +24,6 @@ from src.presentation.endpoints.inferences import router as inferences_router
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.files_dir.mkdir(parents=True, exist_ok=True)
     settings.hf_cache_dir.mkdir(parents=True, exist_ok=True)
 
     init_engine(settings)

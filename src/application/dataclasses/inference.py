@@ -3,38 +3,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from src.application.dataclasses.image import ImageUpload
-
 
 @dataclass(frozen=True, slots=True)
 class InferenceCreateRequest:
-    prompt: str
-    image: ImageUpload | None
-    max_new_tokens: int
+    query: str | None
+    images: list[str] | None
+    guided_json: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class InferenceRecord:
     id: int
-    prompt: str
-    response: str
-    image_relative_path: str | None
-    image_filename: str | None
-    image_mime: str | None
-    max_new_tokens: int
-    latency_ms: int
+    query: str | None
+    images: list[str] | None
+    output: str
+    guided_json: dict | None
+    latency_ms: float | None
     created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class InferenceDraft:
-    prompt: str
-    response: str
-    image_relative_path: str | None
-    image_filename: str | None
-    image_mime: str | None
-    max_new_tokens: int
-    latency_ms: int
+    query: str | None
+    images: list[str] | None
+    output: str
+    guided_json: dict | None
+    latency_ms: float
 
 
 @dataclass(frozen=True, slots=True)

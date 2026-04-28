@@ -21,6 +21,7 @@ dependencies = [
     "transformers>=4.45.0",
     "huggingface-hub>=0.26.0",
     "numpy>=1.26.0",
+    "openai>=2.32.0",
 ]
 
 [tool.uv]
