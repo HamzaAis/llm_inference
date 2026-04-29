@@ -30,10 +30,10 @@ class InferenceService:
         self._onnx_client = onnx_client
         self._image_processor = image_processor
 
-    async def create(self, request: InferenceCreateRequest) -> InferenceRecord:
+    async def create(self, request: InferenceCreateRequest, store_images: bool = True) -> InferenceRecord:
         t0 = time.perf_counter()
-        logger.info("service: create started query_len=%d num_images=%d",
-                   len(request.query or ""), len(request.images or []))
+        logger.info("service: create started query_len=%d num_images=%d store_images=%s",
+                   len(request.query or ""), len(request.images or []), store_images)
 
         try:
             t_step = time.perf_counter()
@@ -60,7 +60,7 @@ class InferenceService:
             draft = InferenceDraft(
                 status=InferenceStatus.COMPLETED,
                 query=request.query,
-                images=preprocessed_images,
+                images=preprocessed_images if store_images else None,
                 output=output,
                 guided_json=request.guided_json,
                 latency_ms=latency_ms,
@@ -82,7 +82,7 @@ class InferenceService:
             draft = InferenceDraft(
                 status=InferenceStatus.FAILED,
                 query=request.query,
-                images=request.images,
+                images=None,
                 output=error_output,
                 guided_json=request.guided_json,
                 latency_ms=latency_ms,
