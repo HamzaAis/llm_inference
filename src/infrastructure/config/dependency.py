@@ -112,3 +112,4 @@ def provide_inference_service(
 SettingsDep = Annotated[Settings, Depends(provide_settings)]
 InferenceServiceDep = Annotated[InferenceService, Depends(provide_inference_service)]
 ModelServiceDep = Annotated[ModelService, Depends(provide_model_service)]
+ImageProcessorDep = Annotated[ImageProcessor, Depends(provide_image_processor)]
